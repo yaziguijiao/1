@@ -1,0 +1,12 @@
+# 本地临时文件
+nskngsjfsj.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 编辑器/系统
+.vscode/
+.DS_Store
+Thumbs.db

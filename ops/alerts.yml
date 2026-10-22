@@ -1,0 +1,76 @@
+# 章节加载失败：Prometheus 告警规则模板
+#
+# 说明：本仓库只有离线日志，没有线上指标系统。以下 YAML 是“日志转指标后”的建议规则，
+# 指标名是占位符，需按实际采集端命名映射（见 ops/README.md 的映射表）。
+# 所有阈值都来自 README 第三节的实测数字，注释里标了依据。
+
+groups:
+  - name: chapter-load-slo
+    interval: 30s
+    rules:
+      # 失败率 = 失败请求 / 有回传请求（未回传不计入分母，与 README 口径一致）
+      - record: chapter:load_failure_ratio:15m
+        expr: |
+          sum by (region) (rate(chapter_requests_total{load_status="0"}[15m]))
+          /
+          sum by (region) (rate(chapter_requests_total{load_status=~"0|1"}[15m]))
+
+      # 目录陈旧流量占比：滞后 > 20 分钟的请求比例。这是比失败率更早的预警信号。
+      - record: chapter:catalog_stale_ratio:15m
+        expr: |
+          sum by (region) (rate(chapter_requests_total{catalog_lag_bucket="gt20"}[15m]))
+          /
+          sum by (region) (rate(chapter_requests_total[15m]))
+
+      # 缓存临期流量占比：TTL <= 5 秒的请求比例（仅华东有意义）。
+      - record: chapter:cache_ttl_low_ratio:15m
+        expr: |
+          sum by (region) (rate(chapter_requests_total{cache_ttl_bucket="le5"}[15m]))
+          /
+          sum by (region) (rate(chapter_requests_total[15m]))
+
+      # ---- 告警 ----
+
+      # 依据：正常态失败率 3.5%（滞后<=20），失效态 27.9%（滞后>20）。
+      # 5% 落在两态之间，低于失效态一半，高于正常态 40%，避免误报。
+      - alert: ChapterLoadFailureRateHigh
+        expr: chapter:load_failure_ratio:15m > 0.05
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.region }} 章节加载失败率 {{ $value | humanizePercentage }}，高于 5%"
+          description: "基线 10.4%（全站）/ 3.5%（正常态）。先看 CatalogStalenessShareHigh 是否同时触发，以区分是同步长尾还是缓存回源问题。"
+          runbook: "ops/README.md#runbook-failure"
+
+      # 依据：当前陈旧请求占 28.4% 流量，目标趋近 0。3% 是“允许少量长尾”的经营线。
+      - alert: CatalogStalenessShareHigh
+        expr: chapter:catalog_stale_ratio:15m > 0.03
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.region }} 目录滞后>20分钟的请求占比 {{ $value | humanizePercentage }}"
+          description: "这些请求的失败率约 27.9%，是全部失败的主要来源（75.8%）。检查该节点目录同步任务是否堆积或超时。"
+          runbook: "ops/README.md#runbook-stale"
+
+      # 依据：华东 TTL<=5 时失败率 32.4%，TTL>5 时仅 1.2%。当前该区间占华东流量 17%。
+      - alert: EastCacheTtlLowShareHigh
+        expr: chapter:cache_ttl_low_ratio:15m{region="华东节点"} > 0.05
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "华东节点缓存临期(TTL<=5s)请求占比 {{ $value | humanizePercentage }}"
+          description: "该区间失败率 32.4%，与其他四区（4.3%）不同源，属华东特有回源/刷新路径问题。"
+          runbook: "ops/README.md#runbook-ttl"
+
+      # 温和提醒：失败率绝对量在动，但还没到 page 线
+      - alert: ChapterLoadFailureRateElevated
+        expr: chapter:load_failure_ratio:15m > 0.035
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.region }} 失败率 {{ $value | humanizePercentage }} 高于正常态 3.5%"
+          runbook: "ops/README.md#runbook-failure"
